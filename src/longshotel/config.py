@@ -17,7 +17,12 @@ class Settings(BaseSettings):
     """The event slug that appears in the Compass URL path."""
 
     block_index: int = 3
-    """The block index that appears before ``/avail`` in the URL."""
+    """Fallback block index for ``/avail``.  Normally discovered automatically
+    from the category-page redirect."""
+
+    category_id: int = 42031
+    """OnPeak category ID.  The browser navigates to
+    ``/e/{event_code}/in/category/{category_id}`` to establish a session."""
 
     base_url: str = "https://compass.onpeak.com"
     """OnPeak Compass base URL."""
@@ -39,5 +44,12 @@ class Settings(BaseSettings):
     # ── Display ──────────────────────────────────────────────────────────
     show_soldout: bool = False
     """Whether to display sold-out hotels in the results table."""
+
+    # ── Debug ────────────────────────────────────────────────────────────
+    verbose: bool = False
+    """Enable debug logging. Also set via LONGSHOTEL_VERBOSE=1."""
+
+    dump_html: bool = False
+    """Write raw HTML response bodies to files (response_attempt_N.html) for browser inspection. Also set via LONGSHOTEL_DUMP_HTML=1."""
 
     model_config = {"env_prefix": "LONGSHOTEL_", "env_file": ".env"}

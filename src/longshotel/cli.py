@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import sys
 
 from rich.console import Console
@@ -37,6 +38,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=False,
         help="Include sold-out hotels in the output",
     )
+    check_p.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        default=False,
+        help="Enable debug logging",
+    )
 
     # ── monitor ──────────────────────────────────────────────────────────
     mon_p = sub.add_parser(
@@ -60,6 +67,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=False,
         help="Include sold-out hotels in the output",
     )
+    mon_p.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        default=False,
+        help="Enable debug logging",
+    )
 
     return parser.parse_args(argv)
 
@@ -74,6 +87,8 @@ def _settings_from_args(args: argparse.Namespace) -> Settings:
         overrides["show_soldout"] = True
     if getattr(args, "interval", None):
         overrides["poll_interval_seconds"] = args.interval
+    if getattr(args, "verbose", False):
+        overrides["verbose"] = True
     return Settings(**overrides)  # type: ignore[arg-type]
 
 
@@ -97,6 +112,9 @@ async def _monitor(settings: Settings) -> None:
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     settings = _settings_from_args(args)
+
+    if settings.verbose:
+        logging.basicConfig(level=logging.DEBUG, format="%(levelname)s %(message)s")
 
     if args.command == "check":
         asyncio.run(_check(settings))

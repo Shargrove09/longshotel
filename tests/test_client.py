@@ -8,8 +8,8 @@ from longshotel.client import fetch_available_hotels, fetch_hotels
 from longshotel.config import Settings
 
 MOCK_RESPONSE = {
-    "hotels": {
-        "0": {
+    "hotels": [
+        {
             "hotelId": 1001,
             "name": "Hotel Alpha",
             "hotelChain": "Chain A",
@@ -42,7 +42,7 @@ MOCK_RESPONSE = {
                 "maxMultiBlockReservations": 0,
             },
         },
-        "1": {
+        {
             "hotelId": 1002,
             "name": "Hotel Beta",
             "hotelChain": "Chain B",
@@ -75,7 +75,7 @@ MOCK_RESPONSE = {
                 "maxMultiBlockReservations": 0,
             },
         },
-    }
+    ]
 }
 
 SETTINGS = Settings(
@@ -121,7 +121,7 @@ async def test_fetch_available_hotels_filters_soldout() -> None:
 @pytest.mark.asyncio
 async def test_fetch_hotels_empty_response() -> None:
     respx.get("https://compass.onpeak.com/e/TEST/1/avail").mock(
-        return_value=httpx.Response(200, json={"hotels": {}})
+        return_value=httpx.Response(200, json={"hotels": []})
     )
 
     async with httpx.AsyncClient() as client:
@@ -134,10 +134,10 @@ async def test_fetch_hotels_empty_response() -> None:
 @pytest.mark.asyncio
 async def test_fetch_hotels_malformed_entry_skipped() -> None:
     bad_response = {
-        "hotels": {
-            "0": {"bad": "data"},  # Missing required fields
-            "1": MOCK_RESPONSE["hotels"]["0"],
-        }
+        "hotels": [
+            {"bad": "data"},  # Missing required fields
+            MOCK_RESPONSE["hotels"][0],
+        ]
     }
     respx.get("https://compass.onpeak.com/e/TEST/1/avail").mock(
         return_value=httpx.Response(200, json=bad_response)
