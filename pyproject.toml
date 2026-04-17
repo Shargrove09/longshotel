@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "longshotel"
+version = "0.1.0"
+description = "Monitor hotel availability for San Diego Comic-Con 2026 via the OnPeak Compass API"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.28,<1",
+    "playwright>=1.49,<2",
+    "pydantic>=2.11,<3",
+    "pydantic-settings>=2.9,<3",
+    "rich>=14,<15",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<9",
+    "pytest-asyncio>=0.25,<1",
+    "respx>=0.22,<1",
+]
+
+[project.scripts]
+longshotel = "longshotel.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
