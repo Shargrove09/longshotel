@@ -52,6 +52,9 @@ class Settings(BaseSettings):
     poll_interval_seconds: int = 300
     """How often to poll the API when running in monitor mode."""
 
+    poll_jitter_seconds: int = 30
+    """Random jitter added to each poll interval (0 to this value)."""
+
     # ── Notifications (optional) ─────────────────────────────────────────
     discord_webhook_url: str | None = None
     """If set, availability changes are posted to this Discord webhook."""

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 from datetime import datetime, timezone
 
 from rich.console import Console
@@ -50,9 +51,14 @@ async def run_monitor(settings: Settings | None = None) -> None:
     previous_available: set[int] | None = None
     hotels_by_id: dict[int, Hotel] = {}
 
+    jitter_label = (
+        f" (±{settings.poll_jitter_seconds}s jitter)"
+        if settings.poll_jitter_seconds
+        else ""
+    )
     console.print(
         f"[bold cyan]Starting monitor[/bold cyan] — polling every "
-        f"{settings.poll_interval_seconds}s  (Ctrl+C to stop)\n"
+        f"{settings.poll_interval_seconds}s{jitter_label}  (Ctrl+C to stop)\n"
     )
 
     while True:
@@ -61,7 +67,8 @@ async def run_monitor(settings: Settings | None = None) -> None:
             hotels = await fetch_hotels(settings)
         except Exception as exc:
             console.print(f"[red][{now}] Error fetching hotels: {exc}[/red]")
-            await asyncio.sleep(settings.poll_interval_seconds)
+            jitter = random.uniform(0, settings.poll_jitter_seconds)
+            await asyncio.sleep(settings.poll_interval_seconds + jitter)
             continue
 
         hotels_by_id = {h.hotel_id: h for h in hotels}
@@ -130,4 +137,5 @@ async def run_monitor(settings: Settings | None = None) -> None:
                 )
 
         previous_available = current_available
-        await asyncio.sleep(settings.poll_interval_seconds)
+        jitter = random.uniform(0, settings.poll_jitter_seconds)
+        await asyncio.sleep(settings.poll_interval_seconds + jitter)
