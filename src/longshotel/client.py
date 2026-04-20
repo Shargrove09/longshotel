@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import re as _re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -37,6 +39,18 @@ _JSON_HEADERS = {
     "User-Agent": _BROWSER_UA,
 }
 
+# Retry configuration for fetch_hotels_dual
+_MAX_RETRIES = 3
+_RETRY_DELAYS = (2.0, 4.0, 8.0)
+
+# Per-event block-index cache populated by the httpx discovery path.
+_block_cache: dict[str, int] = {}
+
+
+def _invalidate_block_cache(event_code: str) -> None:
+    """Remove a cached block index so it will be re-discovered on the next call."""
+    _block_cache.pop(event_code, None)
+
 
 def _build_url(settings: Settings, block_index: int | None = None) -> str:
     """Construct the availability endpoint URL."""
@@ -57,7 +71,128 @@ def _build_params(settings: Settings) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Playwright-based live fetcher
+# Block-index discovery via HTTP redirect
+# ---------------------------------------------------------------------------
+
+async def _discover_block(settings: Settings, client: httpx.AsyncClient) -> int:
+    """Discover the active block index by following the category-page redirect.
+
+    OnPeak redirects ``/e/{event}/in/category/{category_id}`` to
+    ``/e/{event}/{block}`` (e.g. ``/e/43CCI2026HIR/10``).  We extract the
+    block number from the final URL and cache it for the lifetime of the
+    process.
+    """
+    if settings.event_code in _block_cache:
+        cached = _block_cache[settings.event_code]
+        log.debug("[httpx] using cached block %d for event %s", cached, settings.event_code)
+        return cached
+
+    category_url = (
+        f"{settings.base_url}/e/{settings.event_code}"
+        f"/in/category/{settings.category_id}"
+    )
+    log.debug("[httpx] discovering block via %s", category_url)
+    try:
+        resp = await client.get(category_url, timeout=15)
+        final_url = str(resp.url)
+        m = _re.search(r"/e/[^/]+/(\d+)", final_url)
+        if m:
+            block = int(m.group(1))
+            log.info("[httpx] discovered block %d (redirect → %s)", block, final_url)
+            _block_cache[settings.event_code] = block
+            return block
+        log.debug("[httpx] no block number found in final URL %s", final_url)
+    except Exception as exc:
+        log.debug("[httpx] block discovery request failed: %s", exc)
+
+    log.debug("[httpx] falling back to configured block_index=%d", settings.block_index)
+    return settings.block_index
+
+
+# ---------------------------------------------------------------------------
+# Direct httpx fetch (primary path — no browser required)
+# ---------------------------------------------------------------------------
+
+async def _fetch_via_httpx(settings: Settings) -> FetchResult | None:
+    """Fetch hotel availability directly via httpx without a browser.
+
+    Returns a ``FetchResult`` on success, or ``None`` if the response is
+    invalid so that the caller can fall back to the Playwright browser path.
+
+    Steps
+    -----
+    1. Follow the category-page redirect to discover (and cache) the block index.
+    2. GET ``/{block}/avail`` (no date params) for general availability.
+    3. GET ``/{block}/avail?arrive=…&depart=…`` for date-specific availability.
+    """
+    async with httpx.AsyncClient(
+        headers=_JSON_HEADERS,
+        follow_redirects=True,
+        timeout=httpx.Timeout(15.0),
+    ) as client:
+        try:
+            block = await _discover_block(settings, client)
+            avail_url = _build_url(settings, block_index=block)
+
+            # ── General availability (no date filter) ────────────────
+            log.debug("[httpx] GET %s (general)", avail_url)
+            gen_resp = await client.get(avail_url)
+            gen_resp.raise_for_status()
+            gen_data: Any = gen_resp.json()
+            if not isinstance(gen_data, dict) or "hotels" not in gen_data:
+                log.warning("[httpx] general /avail missing 'hotels' key — invalidating block cache")
+                _invalidate_block_cache(settings.event_code)
+                return None
+            general_hotels = _parse_hotels_from_data(gen_data)
+            log.info(
+                "[httpx] general: %d hotels, %d available",
+                len(general_hotels),
+                sum(1 for h in general_hotels if h.is_available),
+            )
+
+            # ── Date-specific availability ───────────────────────────
+            params = _build_params(settings)
+            log.debug("[httpx] GET %s (dated %s–%s)", avail_url, settings.arrive, settings.depart)
+            dated_resp = await client.get(
+                avail_url,
+                params=params,
+                headers={**_JSON_HEADERS, "Referer": f"{settings.base_url}/e/{settings.event_code}/{block}"},
+            )
+            dated_resp.raise_for_status()
+            dated_data: Any = dated_resp.json()
+            if isinstance(dated_data, dict) and "hotels" in dated_data:
+                dated_hotels = _parse_hotels_from_data(dated_data)
+                log.info(
+                    "[httpx] dated: %d hotels, %d available (for %s–%s)",
+                    len(dated_hotels),
+                    sum(1 for h in dated_hotels if h.is_available),
+                    settings.arrive,
+                    settings.depart,
+                )
+                return FetchResult(general=general_hotels, dated=dated_hotels)
+
+            # Dated call returned unexpected format — reuse general data
+            log.warning("[httpx] dated /avail missing 'hotels' key — using general data for dated")
+            return FetchResult(general=general_hotels, dated=general_hotels)
+
+        except httpx.HTTPStatusError as exc:
+            log.warning(
+                "[httpx] HTTP %s from %s — invalidating block cache",
+                exc.response.status_code,
+                exc.request.url,
+            )
+            _invalidate_block_cache(settings.event_code)
+            return None
+        except httpx.RequestError as exc:
+            log.warning("[httpx] request error: %s", exc)
+            return None
+        except Exception as exc:
+            log.warning("[httpx] unexpected error: %s", exc)
+            return None
+
+
+# ---------------------------------------------------------------------------
+# Playwright-based live fetcher (fallback only)
 # ---------------------------------------------------------------------------
 
 _NAVIGATE_TIMEOUT_MS = 30_000
@@ -66,24 +201,24 @@ _NAVIGATE_TIMEOUT_MS = 30_000
 async def _fetch_via_browser(settings: Settings) -> FetchResult:
     """Navigate the OnPeak category page and intercept the /avail XHR.
 
+    This is kept as a fallback in case the direct httpx path is blocked
+    (e.g. a Queue-It waiting room or bot-detection challenge is introduced).
+
     Returns a ``FetchResult`` containing:
     * **general** — availability from the initial page XHR (no date filter).
     * **dated** — availability for the user's arrive/depart range.
 
     Strategy
     --------
-    1. Navigate to ``/e/{event}/in/category/{category_id}``.  This is the
-       public entry point that works without Queue-it (even in incognito).
-    2. The server redirects to e.g. ``/e/{event}/10#hotels`` and the page's
-       own JavaScript fires an XHR to ``/{block}/avail?_=…``.
+    1. Navigate to ``/e/{event}/in/category/{category_id}``.
+    2. The server redirects and the page's own JavaScript fires an XHR to
+       ``/{block}/avail?_=…``.
     3. We intercept that response, extract the block number, and parse the
        hotel JSON directly.
     4. If the user specified ``arrive``/``depart`` dates we make a follow-up
        ``/avail`` call with those parameters using the established session.
     """
     from playwright.async_api import async_playwright
-    import asyncio
-    import re as _re
 
     category_url = (
         f"{settings.base_url}/e/{settings.event_code}"
@@ -274,9 +409,9 @@ async def fetch_hotels(
     """Fetch date-specific hotel availability.
 
     When *client* is provided (unit tests), a single direct ``/avail`` call
-    is made via ``httpx``.  For live requests the function delegates to a
-    headless Chromium browser via Playwright so that the full Queue-it /
-    cookie-check session dance is handled natively by the browser engine.
+    is made via ``httpx``.  For live requests the function delegates to
+    ``fetch_hotels_dual`` which tries a fast httpx path first and falls back
+    to the Playwright browser if needed.
     """
     if settings is None:
         settings = Settings()
@@ -289,17 +424,82 @@ async def fetch_hotels(
         resp.raise_for_status()
         return _parse_hotels(resp)
 
-    result = await _fetch_via_browser(settings)
+    result = await fetch_hotels_dual(settings)
     return result.dated
 
 
 async def fetch_hotels_dual(
     settings: Settings | None = None,
 ) -> FetchResult:
-    """Fetch both general and date-specific availability in one browser session."""
+    """Fetch both general and date-specific availability.
+
+    Primary path: direct ``httpx`` call (~1-2 s, no browser required).
+    Fallback path: Playwright headless browser (handles any Queue-It /
+    bot-check challenges that may appear in future).
+
+    Retries up to ``_MAX_RETRIES`` times with exponential back-off
+    (2 s / 4 s / 8 s) before propagating an error to the caller so that
+    transient network blips do not cause the monitor to lose its baseline.
+    """
     if settings is None:
         settings = Settings()
-    return await _fetch_via_browser(settings)
+
+    last_exc: Exception | None = None
+    for attempt in range(_MAX_RETRIES + 1):
+        if attempt > 0:
+            delay = _RETRY_DELAYS[attempt - 1]
+            log.info("[fetch] retry %d/%d — waiting %.0fs", attempt, _MAX_RETRIES, delay)
+            await asyncio.sleep(delay)
+
+        try:
+            # Fast path: direct httpx (no browser, ~1-2 s)
+            result = await _fetch_via_httpx(settings)
+            if result is not None:
+                return result
+
+            # Slow path: Playwright browser fallback
+            log.info("[fetch] httpx path yielded no data — trying browser fallback")
+            result = await _fetch_via_browser(settings)
+            if result.dated or result.general:
+                return result
+
+            log.warning(
+                "[fetch] attempt %d: both httpx and browser returned empty results",
+                attempt + 1,
+            )
+        except Exception as exc:
+            last_exc = exc
+            log.warning("[fetch] attempt %d failed: %s", attempt + 1, exc)
+
+    if last_exc:
+        raise last_exc
+    return FetchResult()
+
+
+async def fetch_dated_hotels(
+    settings: Settings,
+    arrive: str,
+    depart: str,
+) -> list[Hotel]:
+    """Fetch date-specific availability for an alternative arrive/depart range.
+
+    Used by the monitor's flex-date scan.  The block index is already cached
+    from the main ``fetch_hotels_dual`` call so this is a single lightweight
+    HTTP request.
+    """
+    flex = settings.model_copy(update={"arrive": arrive, "depart": depart})
+    result = await _fetch_via_httpx(flex)
+    return result.dated if result is not None else []
+
+
+async def fetch_available_hotels(
+    settings: Settings | None = None,
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> list[Hotel]:
+    """Convenience wrapper that returns only hotels with rooms available."""
+    hotels = await fetch_hotels(settings, client=client)
+    return [h for h in hotels if h.is_available]
 
 
 def _parse_hotels(resp: httpx.Response) -> list[Hotel]:
@@ -341,12 +541,3 @@ def _parse_hotels(resp: httpx.Response) -> list[Hotel]:
         log.debug("[parse] hotel %d %-40s status=%-12s rate=%s", h.hotel_id, h.name, h.status, h.display_rate)
     return hotels
 
-
-async def fetch_available_hotels(
-    settings: Settings | None = None,
-    *,
-    client: httpx.AsyncClient | None = None,
-) -> list[Hotel]:
-    """Convenience wrapper that returns only hotels with rooms available."""
-    hotels = await fetch_hotels(settings, client=client)
-    return [h for h in hotels if h.is_available]

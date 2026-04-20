@@ -192,3 +192,29 @@ async def send_discord_general_notification(
         for h in hotels
     )
     await _send_discord(settings, "\n".join(lines))
+
+
+async def send_discord_flex_notification(
+    settings: Settings,
+    hotels: list[Hotel],
+    flex_arrive: str,
+    flex_depart: str,
+) -> None:
+    """Post a message about newly available hotels for a flex date range."""
+    if not hotels:
+        return
+
+    lines = [
+        f"**📅 Hotels available for alternate dates {flex_arrive}–{flex_depart}!**\n",
+    ]
+    lines.extend(_format_hotel_line(h) for h in hotels)
+    await _send_discord(settings, "\n".join(lines))
+
+
+async def send_discord_status_report(settings: Settings, report: str) -> None:
+    """Post an aggregated status report to Discord.
+
+    Always called at the configured ``status_report_interval_seconds``
+    regardless of whether any availability changes occurred.
+    """
+    await _send_discord(settings, report)

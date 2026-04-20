@@ -79,6 +79,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Notification mode: off, changes (default), or every",
     )
+    mon_p.add_argument(
+        "--report-interval",
+        type=int,
+        default=None,
+        metavar="SECONDS",
+        help="Send an aggregated status report every N seconds (0 = disabled)",
+    )
 
     return parser.parse_args(argv)
 
@@ -97,6 +104,8 @@ def _settings_from_args(args: argparse.Namespace) -> Settings:
         overrides["verbose"] = True
     if getattr(args, "notify", None):
         overrides["notify_mode"] = args.notify
+    if getattr(args, "report_interval", None) is not None:
+        overrides["status_report_interval_seconds"] = args.report_interval
     return Settings(**overrides)  # type: ignore[arg-type]
 
 

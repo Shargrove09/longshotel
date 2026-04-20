@@ -49,11 +49,25 @@ class Settings(BaseSettings):
     """Check-out date in YYYY-MM-DD format."""
 
     # ── Monitoring ───────────────────────────────────────────────────────
-    poll_interval_seconds: int = 300
+    poll_interval_seconds: int = 60
     """How often to poll the API when running in monitor mode."""
 
-    poll_jitter_seconds: int = 30
-    """Random jitter added to each poll interval (0 to this value)."""
+    poll_jitter_seconds: int = 6
+    """Random jitter added to each poll interval (0 to this value, ~10% of default interval)."""
+
+    state_file: str | None = None
+    """Path to a JSON file for persisting availability state across restarts.
+    On startup the previous baseline is loaded so changes since the last run
+    are detected immediately on the first poll."""
+
+    date_flex_days: int = 0
+    """If >0, also scan ±N day shifts of the primary stay (same length).
+    Alerts are fired when hotels become available for any of the flex ranges."""
+
+    status_report_interval_seconds: int = 0
+    """Send a periodic aggregated status report every N seconds. 0 = disabled.
+    The report is always sent (regardless of notify_mode) as long as Discord
+    is configured and this value is >0."""
 
     # ── Notifications (optional) ─────────────────────────────────────────
     discord_webhook_url: str | None = None
