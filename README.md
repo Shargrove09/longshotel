@@ -27,6 +27,7 @@ longshotel monitor --interval 30 --report-interval 3600
 
 # Also scan ±1 day flex dates (same stay length, shifted by 1 day)
 longshotel monitor --interval 30
+LONGSHOTEL_DATE_FLEX_DAYS=1 longshotel monitor --interval 30
 ```
 
 ## Configuration

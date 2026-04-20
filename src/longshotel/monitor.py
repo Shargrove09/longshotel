@@ -98,7 +98,7 @@ class StatusReportAggregator:
             duration_str = f"{total_mins}m"
 
         lines: list[str] = [
-            "📊 **SDCC 2026 — Status Report**",
+            f"📊 **{settings.event_code} — Status Report**",
             f"Period: {start_str} → {end_str} UTC ({duration_str})",
             f"Polls: {self._polls_ok} successful / {self._polls_failed} failed",
             "",
