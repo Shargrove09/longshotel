@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import time
 from datetime import datetime, timezone
 
 from rich.console import Console
@@ -15,6 +16,7 @@ from longshotel.display import print_hotels
 from longshotel.models import Hotel
 from longshotel.notifications import (
     send_discord_general_notification,
+    send_discord_interval_summary,
     send_discord_notification,
     send_discord_soldout_notification,
     send_discord_summary,
@@ -71,6 +73,17 @@ def _is_degraded(hotels: list[Hotel], previous_count: int, now: str, label: str)
     return False
 
 
+def _in_quiet_hours(settings: Settings) -> bool:
+    """Return True if the current local time falls within configured quiet hours."""
+    start, end = settings.quiet_hours_start, settings.quiet_hours_end
+    if start == end:
+        return False
+    hour = datetime.now().hour
+    if start > end:  # midnight-crossing window e.g. 22–06
+        return hour >= start or hour < end
+    return start <= hour < end  # same-day window e.g. 02–07
+
+
 def _compute_sleep_seconds(settings: Settings, consecutive_errors: int) -> float:
     """Return how long to sleep before the next poll cycle."""
     if consecutive_errors > 0:
@@ -78,17 +91,9 @@ def _compute_sleep_seconds(settings: Settings, consecutive_errors: int) -> float
         capped = min(base, settings.backoff_max_seconds)
         return capped + random.uniform(0, capped * 0.2)
 
-    hour = datetime.now().hour
-    start, end = settings.quiet_hours_start, settings.quiet_hours_end
-    if start != end:
-        in_quiet = (
-            (hour >= start or hour < end)  # midnight-crossing window
-            if start > end
-            else (start <= hour < end)     # same-day window
-        )
-        if in_quiet:
-            interval = settings.quiet_hours_interval_seconds
-            return interval + random.uniform(0, interval * 0.2)
+    if _in_quiet_hours(settings):
+        interval = settings.quiet_hours_interval_seconds
+        return interval + random.uniform(0, interval * 0.2)
 
     interval = settings.poll_interval_seconds
     return interval + random.uniform(0, interval * 0.2)
@@ -123,6 +128,12 @@ async def run_monitor(settings: Settings | None = None) -> None:
     prev_dated_count: int = 0
     consecutive_errors: int = 0
 
+    interval_start_time: float | None = None
+    interval_start_wall_str: str = ""
+    interval_start_dated_available: set[int] | None = None
+    interval_poll_count: int = 0
+    interval_error_count: int = 0
+
     quiet_info = ""
     if settings.quiet_hours_start != settings.quiet_hours_end:
         quiet_info = (
@@ -144,6 +155,7 @@ async def run_monitor(settings: Settings | None = None) -> None:
             consecutive_errors = 0
         except RateLimitedError as exc:
             consecutive_errors += 1
+            interval_error_count += 1
             log.error(
                 "[monitor] %s | rate limited (attempt %d): %s",
                 now, consecutive_errors, exc,
@@ -156,6 +168,7 @@ async def run_monitor(settings: Settings | None = None) -> None:
             continue
         except Exception as exc:
             consecutive_errors += 1
+            interval_error_count += 1
             level = logging.ERROR if consecutive_errors >= 3 else logging.WARNING
             log.log(
                 level,
@@ -203,6 +216,11 @@ async def run_monitor(settings: Settings | None = None) -> None:
                 for hid in general_only:
                     h = general_by_id[hid]
                     console.print(f"  [cyan]○ {h.name}[/cyan] ({h.hotel_chain})")
+
+            # Initialise interval tracking after first successful cycle
+            interval_start_dated_available = cur_dated_available.copy()
+            interval_start_time = time.monotonic()
+            interval_start_wall_str = now
         else:
             any_change = False
 
@@ -288,6 +306,48 @@ async def run_monitor(settings: Settings | None = None) -> None:
                 await send_discord_summary(settings, dated_hotels)
             except Exception as exc:
                 console.print(f"  [red]Discord summary failed: {exc}[/red]")
+
+        interval_poll_count += 1
+
+        # ── Interval summary ─────────────────────────────────────────────
+        if (
+            settings.interval_summary_notification_seconds > 0
+            and interval_start_time is not None
+            and (time.monotonic() - interval_start_time) >= settings.interval_summary_notification_seconds
+            and notify_mode != NotifyMode.off
+            and settings.discord_configured
+        ):
+            if _in_quiet_hours(settings):
+                log.info("[monitor] %s | interval summary suppressed (quiet hours)", now)
+                console.print(f"[dim][{now}] Interval summary suppressed (quiet hours)[/dim]")
+            else:
+                newly_available_net = cur_dated_available - interval_start_dated_available
+                newly_soldout_net = interval_start_dated_available - cur_dated_available
+                try:
+                    await send_discord_interval_summary(
+                        settings,
+                        newly_available_net=[
+                            dated_by_id[hid] for hid in newly_available_net if hid in dated_by_id
+                        ],
+                        newly_soldout_net=[
+                            dated_by_id.get(hid) for hid in newly_soldout_net
+                        ],
+                        current_available=[
+                            dated_by_id[hid] for hid in cur_dated_available if hid in dated_by_id
+                        ],
+                        poll_count=interval_poll_count,
+                        error_count=interval_error_count,
+                        period_start=interval_start_wall_str,
+                        period_end=now,
+                    )
+                except Exception as exc:
+                    console.print(f"  [red]Discord interval summary failed: {exc}[/red]")
+            # Reset unconditionally — quiet hours suppression skips, does not defer
+            interval_start_dated_available = cur_dated_available.copy()
+            interval_start_time = time.monotonic()
+            interval_start_wall_str = now
+            interval_poll_count = 0
+            interval_error_count = 0
 
         prev_general_available = cur_general_available
         prev_dated_available = cur_dated_available

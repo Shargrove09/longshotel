@@ -192,3 +192,35 @@ async def send_discord_general_notification(
         for h in hotels
     )
     await _send_discord(settings, "\n".join(lines))
+
+
+async def send_discord_interval_summary(
+    settings: Settings,
+    newly_available_net: list[Hotel],
+    newly_soldout_net: list[Hotel | None],
+    current_available: list[Hotel],
+    poll_count: int,
+    error_count: int,
+    period_start: str,
+    period_end: str,
+) -> None:
+    """Post a periodic interval summary covering net changes since the last report."""
+    arrive, depart = settings.arrive, settings.depart
+    lines = [
+        f"**⏱ Hourly Report — SDCC 2026 ({arrive}–{depart})**",
+        f"Period: {period_start} → {period_end}",
+        f"Polls: {poll_count} | Errors: {error_count}",
+        f"Currently available: {len(current_available)} hotel(s)",
+    ]
+    if newly_available_net:
+        lines.append(f"\n**➕ Became available ({len(newly_available_net)}):**")
+        lines.extend(_format_hotel_line(h) for h in newly_available_net)
+    if newly_soldout_net:
+        lines.append(f"\n**➖ Sold out ({len(newly_soldout_net)}):**")
+        for h in newly_soldout_net:
+            name = h.name if h else "Unknown hotel"
+            chain = f" ({h.hotel_chain})" if h else ""
+            lines.append(f"• **{name}**{chain} — SOLD OUT")
+    if not newly_available_net and not newly_soldout_net:
+        lines.append("\nNo net changes this period.")
+    await _send_discord(settings, "\n".join(lines))

@@ -67,6 +67,9 @@ class Settings(BaseSettings):
     backoff_max_seconds: int = 3600
     """Cap for exponential backoff on consecutive errors (default 1 hr)."""
 
+    interval_summary_notification_seconds: int = 3600
+    """Send a periodic Discord summary every N seconds (0 = disabled). Default 1 hour."""
+
     # ── Notifications (optional) ─────────────────────────────────────────
     discord_webhook_url: str | None = None
     """If set, availability changes are posted to this Discord webhook."""
